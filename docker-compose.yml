@@ -1,0 +1,88 @@
+services:
+  kafka:
+    image: quay.io/strimzi/kafka:0.46.0-kafka-3.9.0
+    container_name: kafka
+    hostname: kafka
+    ports:
+      - 9092:9092  # Docker internal (kafka:9092)
+      - 9094:9094  # Host external (localhost:9094)
+      - 9093:9093  # Controller
+    environment:
+      LOG_DIR: /tmp/logs
+    command:
+      - sh
+      - -c
+      - |
+        echo "🚀 Formatting KRaft storage (ignore if already formatted)..."
+        /opt/kafka/bin/kafka-storage.sh format -t kafka-cluster -c /opt/kafka/config/kraft/server.properties --ignore-formatted
+        echo "✅ Starting Kafka..."
+        exec /opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/kraft/server.properties \
+          --override listeners=PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:9094,CONTROLLER://0.0.0.0:9093 \
+          --override advertised.listeners=PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9094,CONTROLLER://kafka:9093 \
+          --override listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT \
+          --override controller.listener.names=CONTROLLER \
+          --override inter.broker.listener.name=PLAINTEXT
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.5.3
+    container_name: schema-registry
+    depends_on:
+      - kafka
+    ports:
+      - 8081:8081
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:9092
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: 1
+
+  kafka-connect:
+    image: quay.io/strimzi/kafka:0.46.0-kafka-3.9.0
+    container_name: kafka-connect
+    hostname: kafka-connect
+    depends_on:
+      - kafka
+    ports:
+      - 8083:8083
+    environment:
+      # Bootstrap vers votre broker Strimzi (service 'kafka' du compose)
+      KAFKA_CONNECT_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KAFKA_CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KAFKA_CONNECT_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      LOG_DIR: /tmp/logs
+    volumes:
+      - ./kafka-plugins:/opt/kafka/plugins/
+    command:
+      - sh
+      - -c
+      - |
+        echo "✅ Setting init config for Kafka Connect... "
+        cp /opt/kafka/config/connect-distributed.properties /tmp/connect-distributed.properties
+        sed -i "s|bootstrap.servers=.*|bootstrap.servers=$${KAFKA_CONNECT_BOOTSTRAP_SERVERS}|g" /tmp/connect-distributed.properties
+        sed -i "s|key.converter=.*|key.converter=$${KAFKA_CONNECT_KEY_CONVERTER}|g" /tmp/connect-distributed.properties
+        sed -i "s|value.converter=.*|value.converter=$${KAFKA_CONNECT_VALUE_CONVERTER}|g" /tmp/connect-distributed.properties
+        echo "key.converter.schema.registry.url=$${KAFKA_CONNECT_SCHEMA_REGISTRY_URL}" >> /tmp/connect-distributed.properties
+        echo "value.converter.schema.registry.url=$${KAFKA_CONNECT_SCHEMA_REGISTRY_URL}" >> /tmp/connect-distributed.properties
+        echo "plugin.path=/opt/kafka/plugins/" >> /tmp/connect-distributed.properties
+        echo "✅ Starting Strimzi Kafka Connect..."
+        exec /opt/kafka/bin/connect-distributed.sh /tmp/connect-distributed.properties
+    restart: "on-failure"
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    platform: linux/amd64
+    container_name: kafka-ui
+    ports:
+      - 8082:8080
+    depends_on:
+      - kafka
+      - schema-registry
+      - kafka-connect
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: FIRST
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://kafka-connect:8083
+      DYNAMIC_CONFIG_ENABLED: "true"
+
